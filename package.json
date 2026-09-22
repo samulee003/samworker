@@ -1,0 +1,27 @@
+{
+  "name": "samworker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "dsh web",
+    "test:context": "tsx eval/eval_runner.ts --layer smoke --only smoke-01,smoke-08",
+    "test:adapters": "tsx eval/eval_runner.ts --layer smoke --only smoke-02,smoke-04,smoke-05,smoke-09,smoke-10",
+    "test:guardian": "tsx eval/eval_runner.ts --layer security",
+    "eval:smoke": "tsx eval/eval_runner.ts --layer smoke",
+    "eval:golden": "tsx eval/eval_runner.ts --layer golden",
+    "eval:edge": "tsx eval/eval_runner.ts --layer edge",
+    "eval:integration": "tsx eval/eval_runner.ts --layer integration",
+    "eval:mouse": "tsx eval/eval_runner.ts --layer mouse",
+    "eval:all": "tsx eval/eval_runner.ts --layer all"
+  },
+  "dependencies": {
+    "minimatch": "^9.0.0",
+    "node-cron": "^3.0.3",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
