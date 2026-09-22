@@ -114,6 +114,14 @@ export class ContextStore {
     return (this.kvGet(`idem:${key}`) as string) ?? null;
   }
 
+  /** Atomic claim: true if this caller owns the key. */
+  claimIdempotentTask(key: string, taskId: string): boolean {
+    const info = this.db
+      .prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING')
+      .run(`idem:${key}`, JSON.stringify(taskId));
+    return Number((info as any)?.changes ?? 0) === 1;
+  }
+
   saveIdempotentTask(key: string, taskId: string): void {
     this.kvSet(`idem:${key}`, taskId);
   }

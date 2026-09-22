@@ -26,135 +26,156 @@ export function systemPrompt(): string {
   return SYSTEM_PROMPT;
 }
 
-function matchLevel(tool: string, args: any): { level: string; ruleId: string | null; needApproval: boolean } {
-  if (tool.startsWith('fs.')) {
-    if (tool === 'fs.writeFile') {
-      const exists = false; // existence checked in adapter; treat write as overwrite-sensitive
-      return { level: 'ask_everytime', ruleId: exists ? 'fs-write-overwrite' : 'fs-write-new', needApproval: true };
+function matchLevel(tool: string, store: ContextStore): { level: string; ruleId: string; needApproval: boolean } {
+  if (tool === 'fs.writeFile') {
+    const ruleId = 'fs-write-new';
+    const cached = store.getApproval(ruleId);
+    if (cached === 'allow_same_scope' || cached === 'full_trust') {
+      return { level: cached, ruleId, needApproval: false };
     }
-    return { level: 'allow_once', ruleId: 'fs-read-workspace', needApproval: false };
+    return { level: 'ask_everytime', ruleId, needApproval: true };
   }
-  return { level: 'ask_everytime', ruleId: 'default', needApproval: true };
+  if (tool.startsWith('fs.')) {
+    const ruleId = 'fs-read-workspace';
+    return { level: 'allow_once', ruleId, needApproval: false };
+  }
+  const ruleId = 'default';
+  const cached = store.getApproval(ruleId);
+  if (cached === 'allow_same_scope' || cached === 'full_trust') {
+    return { level: cached, ruleId, needApproval: false };
+  }
+  return { level: 'ask_everytime', ruleId, needApproval: true };
 }
 
-export async function startTask(goal: string, opts: StartOpts = {}): Promise<TaskResult> {
+async function runTask(goal: string, opts: StartOpts, taskId: string): Promise<TaskResult> {
   const source = opts.source ?? 'cli';
-  const workspaceRoot = path.resolve(opts.workspaceRoot ?? path.join(process.cwd(), '.samworker', 'work', `t_${Date.now()}`));
+  const workspaceRoot = path.resolve(
+    opts.workspaceRoot ?? path.join(process.cwd(), '.samworker', 'work', taskId)
+  );
   fs.mkdirSync(workspaceRoot, { recursive: true });
   const store = new ContextStore(opts.dbPath);
-  const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const plan = opts.plan ?? { goal, steps: [], definition_of_done: 'n/a' };
-  store.savePlan(plan);
-  store.appendTranscript({ taskId, kind: 'result', payload: { goal, source, plan } });
+  try {
+    const plan = opts.plan ?? { goal, steps: [], definition_of_done: 'n/a' };
+    store.savePlan(plan);
+    store.appendTranscript({ taskId, kind: 'result', payload: { goal, source, plan, phase: 'start' } });
 
-  if (opts.voice?.transcript) {
-    store.appendTranscript({
-      taskId,
-      kind: 'voice',
-      payload: { keyId: opts.voice.keyId, ts: opts.voice.ts, transcript: opts.voice.transcript },
-    });
-  }
+    if (opts.voice?.transcript) {
+      store.appendTranscript({
+        taskId,
+        kind: 'voice',
+        payload: { keyId: opts.voice.keyId, ts: opts.voice.ts, transcript: opts.voice.transcript },
+      });
+    }
 
-  const result: TaskResult = { taskId, status: 'COMPLETED', output: [], errors: [], denies: [] };
-  const steps: any[] = Array.isArray(plan) ? plan : (plan.steps ?? []);
+    const result: TaskResult = { taskId, status: 'COMPLETED', output: [], errors: [], denies: [] };
+    const steps: any[] = Array.isArray(plan) ? plan : (plan.steps ?? []);
 
-  for (const step of steps) {
-    const invocationId = `${taskId}:${step.id ?? 0}`;
-    const tool = String(step.tool ?? '');
-    const args = step.args ?? {};
-    try {
-      if (tool.includes('../') || String(args.path ?? '').includes('..')) {
-        // adapter will also deny; guardian-style deny first
-      }
-      const gate = matchLevel(tool, args);
-      let answer = gate.needApproval ? 'ask' : 'allow';
-      if (gate.needApproval && opts.autoApprove) answer = 'allow';
-      if (gate.needApproval && !opts.autoApprove) {
-        const approvalId = `appr_${invocationId}`;
-        store.savePendingApproval(approvalId, { invocationId, tool, args, ruleId: gate.ruleId, source });
-        appendAudit({
-          invocationId,
-          tool,
-          args,
-          ruleId: gate.ruleId,
-          result: 'error',
-          level: 'ask_everytime',
-          source,
-          voiceKey: opts.voice?.keyId,
-          note: 'waiting_for_approval',
-        });
-        const deadline = Date.now() + 30_000;
-        let resolved: string | null = null;
-        while (Date.now() < deadline) {
-          resolved = store.getApprovalResult(approvalId);
-          if (resolved) break;
-          await new Promise((r) => setTimeout(r, 200));
-        }
-        store.clearPendingApproval(approvalId);
-        if (!resolved || resolved === 'deny') {
+    for (const step of steps) {
+      const invocationId = `${taskId}:${step.id ?? 0}`;
+      const tool = String(step.tool ?? '');
+      const args = step.args ?? {};
+      try {
+        const gate = matchLevel(tool, store);
+        if (gate.needApproval && !opts.autoApprove) {
+          const approvalId = `appr_${invocationId}`;
+          store.savePendingApproval(approvalId, { invocationId, tool, args, ruleId: gate.ruleId, source });
           appendAudit({
             invocationId,
             tool,
             args,
             ruleId: gate.ruleId,
-            result: 'deny',
-            level: 'deny',
+            result: 'error',
+            level: 'ask_everytime',
             source,
             voiceKey: opts.voice?.keyId,
+            note: 'waiting_for_approval',
           });
-          result.denies.push(tool);
+          const deadline = Date.now() + 30_000;
+          let resolved: string | null = null;
+          while (Date.now() < deadline) {
+            resolved = store.getApprovalResult(approvalId);
+            if (resolved) break;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          store.clearPendingApproval(approvalId);
+          if (!resolved || resolved === 'deny') {
+            appendAudit({
+              invocationId,
+              tool,
+              args,
+              ruleId: gate.ruleId,
+              result: 'deny',
+              level: 'deny',
+              source,
+              voiceKey: opts.voice?.keyId,
+            });
+            result.denies.push(tool);
+            result.status = 'FAILED';
+            result.errors.push(`approval ${resolved ?? 'timeout'}`);
+            return result;
+          }
+          if (resolved === 'approve_scope') {
+            store.saveApproval(gate.ruleId, 'allow_same_scope');
+          }
+        }
+
+        const res = await fsAdapter.execute(tool, args, { invocationId, workspaceRoot });
+        if (typeof res.data?.content === 'string') result.output.push(res.data.content);
+        if (typeof res.data?.entries === 'object') result.output.push(JSON.stringify(res.data.entries));
+        if (res.data?.ok) result.output.push(String(args.content ?? ''));
+        appendAudit({
+          invocationId,
+          tool,
+          args,
+          ruleId: gate.ruleId,
+          result: 'allow',
+          level: opts.autoApprove || !gate.needApproval ? 'allow_once' : 'allow_once',
+          source,
+          voiceKey: opts.voice?.keyId,
+        });
+        store.appendTranscript({ taskId, kind: 'step', payload: { tool, ok: true } });
+      } catch (e: any) {
+        const msg = String(e?.message ?? e);
+        const deny = msg.includes('Path traversal denied') || e?.name === 'SchemaError';
+        appendAudit({
+          invocationId,
+          tool,
+          args,
+          ruleId: deny ? 'guardian' : null,
+          result: deny ? 'deny' : 'error',
+          level: deny ? 'deny' : 'error',
+          source,
+          voiceKey: opts.voice?.keyId,
+        });
+        result.errors.push(msg);
+        if (deny) {
+          result.denies.push(msg);
           result.status = 'FAILED';
-          result.errors.push(`approval ${resolved ?? 'timeout'}`);
           return result;
         }
-        if (resolved === 'approve_scope') {
-          store.saveApproval(`${gate.ruleId}:*`, 'allow_same_scope');
-        }
-      }
-
-      const res = await fsAdapter.execute(tool, args, { invocationId, workspaceRoot });
-      if (typeof res.data?.content === 'string') result.output.push(res.data.content);
-      if (typeof res.data?.entries === 'object') result.output.push(JSON.stringify(res.data.entries));
-      if (res.data?.ok) result.output.push(String(args.content ?? ''));
-      appendAudit({
-        invocationId,
-        tool,
-        args,
-        ruleId: gate.ruleId,
-        result: 'allow',
-        level: answer === 'allow' ? 'allow_once' : 'allow_same_scope',
-        source,
-        voiceKey: opts.voice?.keyId,
-      });
-      store.appendTranscript({ taskId, kind: 'step', payload: { tool, ok: true } });
-    } catch (e: any) {
-      const msg = String(e?.message ?? e);
-      const deny = msg.includes('Path traversal denied');
-      appendAudit({
-        invocationId,
-        tool,
-        args,
-        ruleId: deny ? 'fs-read-workspace' : null,
-        result: deny ? 'deny' : 'error',
-        level: deny ? 'deny' : 'error',
-        source,
-        voiceKey: opts.voice?.keyId,
-      });
-      result.errors.push(msg);
-      if (deny) {
-        result.denies.push('Path traversal denied');
         result.status = 'FAILED';
         return result;
       }
-      result.status = 'FAILED';
-      return result;
     }
-  }
 
-  store.appendTranscript({ taskId, kind: 'result', payload: { status: result.status, output: result.output } });
-  store.saveState({ taskId, status: result.status, source });
-  store.close();
-  return result;
+    store.appendTranscript({ taskId, kind: 'result', payload: { status: result.status, output: result.output } });
+    store.saveState({ taskId, status: result.status, source });
+    return result;
+  } finally {
+    store.close();
+  }
+}
+
+/** HTTP facade: returns the real taskId immediately and runs the task in background. */
+export function beginTask(goal: string, opts: StartOpts = {}): { taskId: string; done: Promise<TaskResult> } {
+  const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return { taskId, done: runTask(goal, opts, taskId) };
+}
+
+/** Programmatic API. Returns the same TaskResult shape; `taskId` is always present (ADDENDUM). */
+export async function startTask(goal: string, opts: StartOpts = {}): Promise<TaskResult> {
+  const { done } = beginTask(goal, opts);
+  return done;
 }
 
 export { readAudit };

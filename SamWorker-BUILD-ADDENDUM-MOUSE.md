@@ -20,7 +20,8 @@ function startTask(goal: string, opts?: {
   source?: "cli" | "mouse" | "job";     // 預設 "cli"
   voice?: { keyId?: number; ts?: number; transcript?: string };
   plan?: unknown;                        // eval 注入；生產忽略
-}): Promise<{ taskId: string }>;
+}): Promise<TaskResult>;  // TaskResult = { taskId, status, output, errors, denies }；至少含 taskId
+function beginTask(goal: string, opts?): { taskId: string; done: Promise<TaskResult> }; // HTTP 用，立即回真 taskId
 ```
 
 - 呼叫 `startTask(goal)` 的既有程式碼行為不變（`source` 視同 `"cli"`）。
